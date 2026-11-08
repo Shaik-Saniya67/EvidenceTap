@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#FFF8F3">
+<meta name="robots" content="noindex, nofollow">
+<title>Shared with you - EvidenceTap</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="top" id="top"></div>
+<main class="wrap">
+  <div id="err" class="note bad hide" style="margin-top:18px"></div>
+
+  <section class="hero" id="hero">
+    <span class="eyebrow">Shared with you privately</span>
+    <h1>Someone you know may need help</h1>
+    <p class="lead">They chose to share this with you. If you think she is in danger, call her first. If you cannot reach her, call 112.</p>
+  </section>
+
+  <section class="card" id="what">
+    <div class="row between"><h2 style="margin:0">Status</h2><span id="live-badge"></span></div>
+    <p class="muted" id="when" style="margin-top:8px"></p>
+    <div id="map"></div>
+    <p class="tiny" id="pos-time"></p>
+    <div class="row" style="margin-top:6px"><span id="integrity"></span></div>
+  </section>
+
+  <section class="card" id="ack-card">
+    <h2>Let her know you've seen this</h2>
+    <p class="muted">She will see which one you choose.</p>
+    <div class="row">
+      <button class="btn small" data-s="responding" type="button">I'm responding</button>
+      <button class="btn small" data-s="calling" type="button">I'm calling her</button>
+      <button class="btn small" data-s="informed_authorities" type="button">I've informed the authorities</button>
+    </div>
+    <p class="tiny" id="ack-done" style="margin-top:10px"></p>
+  </section>
+
+  <section class="card hide" id="evidence">
+    <h2>Evidence she shared</h2>
+    <div id="details"></div>
+    <audio id="player" controls preload="metadata" class="hide"></audio>
+    <div class="thumbs" id="thumbs"></div>
+  </section>
+
+  <footer id="foot"></footer>
+</main>
+
+<script src="/static/common.js"></script>
+<script>
+ET.header(""); ET.footer();
+const $ = (id) => document.getElementById(id);
+const stoken = location.pathname.split("/").pop();
+let audioSet = false;
+
+function fail(msg) {
+  $("err").textContent = msg; $("err").classList.remove("hide");
+  ["hero", "what", "ack-card", "evidence"].forEach((i) => $(i).classList.add("hide"));
+}
+
+async function load() {
+  let d;
+  try { d = await ET.api(`/api/s/${encodeURIComponent(stoken)}`); }
+  catch (e) { return fail("This link is not active. It may have been stopped or deleted."); }
+
+  $("live-badge").innerHTML = d.status === "recording"
+    ? `<span class="badge warn">Recording right now</span>` : `<span class="badge ok">Recording finished</span>`;
+  $("when").textContent = "Started " + ET.fmtTime(d.created_at) + ".";
+  const lat = d.last_lat ?? d.lat, lon = d.last_lon ?? d.lon;
+  $("map").innerHTML = lat != null ? ET.mapEmbed(lat, lon) : `<p class="muted">No location was captured.</p>`;
+  $("pos-time").textContent = d.last_pos_at ? "Last position update: " + ET.fmtTime(d.last_pos_at) : "";
+  $("integrity").innerHTML = ET.integrityBadge(d.integrity);
+  if (d.ack_status) {
+    const label = { responding: "You said you're responding", calling: "You said you're calling her", informed_authorities: "You said you've informed the authorities" }[d.ack_status];
+    $("ack-done").textContent = `${label} (${ET.fmtTime(d.ack_at)}).`;
+  }
+  if (d.share_scope === "full") {
+    $("evidence").classList.remove("hide");
+    const bits = [];
+    if (d.incident_type) bits.push(`<p><b>Type:</b> ${ET.esc(d.incident_type)}</p>`);
+    if (d.safety_status) bits.push(`<p><b>How she is:</b> ${ET.esc(d.safety_status)}</p>`);
+    if (d.description) bits.push(`<p><b>What happened:</b><br>${ET.esc(d.description).replace(/\n/g, "<br>")}</p>`);
+    if (d.people) bits.push(`<p><b>People or vehicles:</b><br>${ET.esc(d.people).replace(/\n/g, "<br>")}</p>`);
+    $("details").innerHTML = bits.join("") || `<p class="muted">She has not added written details yet.</p>`;
+    if (d.has_audio && !audioSet) {
+      audioSet = true; $("player").src = `/api/records/${d.id}/audio?t=${encodeURIComponent(stoken)}`; $("player").classList.remove("hide");
+    }
+    $("thumbs").innerHTML = (d.items || []).filter((i) => i.kind === "photo").map((p) =>
+      `<img alt="Photo shared with you" src="/api/records/${d.id}/photo/${p.id}?t=${encodeURIComponent(stoken)}">`).join("");
+  }
+}
+document.querySelectorAll("[data-s]").forEach((b) => b.addEventListener("click", async () => {
+  try { await ET.api(`/api/s/${encodeURIComponent(stoken)}/ack`, { method: "POST", json: { status: b.dataset.s } }); ET.toast("She can see that you responded"); load(); }
+  catch { ET.toast("Could not send that. Try again.", 3500); }
+}));
+load(); setInterval(load, 8000);
+</script>
+</body>
+</html>

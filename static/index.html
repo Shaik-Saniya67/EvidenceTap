@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#FFF8F3">
+<title>EvidenceTap: capture it now, decide later</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="top" id="top"></div>
+<main class="wrap">
+
+  <section class="hero">
+    <span class="eyebrow">Evidence in one tap</span>
+    <h1>Capture it now.<br>Decide what to do later.</h1>
+    <p class="lead">One tap records audio, notes the time and place, and saves it to a record that shows if anything is changed afterwards.</p>
+  </section>
+
+  <section class="card" id="capture-card" aria-live="polite">
+    <div class="capture">
+      <button class="tap" id="tap" type="button" aria-label="Start recording">Tap to<br>capture<small>audio + time + place</small></button>
+    </div>
+
+    <div id="live" class="hide">
+      <div class="timer" id="timer">00:00</div>
+      <p class="muted" style="text-align:center;margin:6px 0 14px">
+        <span class="badge warn" id="rec-badge">Recording is on</span>
+      </p>
+      <div class="row" style="justify-content:center;gap:8px">
+        <span class="badge plain" id="loc-badge">Location: finding...</span>
+        <span class="badge plain" id="up-badge">Saved to server: 0 parts</span>
+      </div>
+      <div class="row" style="justify-content:center;margin-top:16px">
+        <button class="btn" id="stop" type="button">Stop and seal the record</button>
+      </div>
+      <p class="tiny" style="text-align:center;margin-top:10px">Keep this page open. Each 5-second part is uploaded as it is recorded, so earlier parts are safe even if the phone is lost.</p>
+    </div>
+
+    <div id="msg" class="note hide" role="alert"></div>
+
+    <div class="note" id="honest" style="margin-top:14px">
+      Recording is always visible here, and your phone will show its microphone indicator. EvidenceTap does not record in secret.
+    </div>
+  </section>
+
+  <section>
+    <h2>How it protects the record</h2>
+    <div class="steps">
+      <div><b>1. Tap</b>Audio, time and location start together.</div>
+      <div><b>2. Chain</b>Every part is hashed and linked to the one before it.</div>
+      <div><b>3. Share</b>Send a private link to someone you trust.</div>
+      <div><b>4. Prove</b>A PDF and a QR code let anyone check nothing changed.</div>
+    </div>
+  </section>
+
+  <section class="card" id="records">
+    <h2>My records</h2>
+    <p class="muted" id="rec-empty">Nothing here yet. Records stay linked to this device, so keep the browser data if you need them later.</p>
+    <ul class="list" id="rec-list"></ul>
+  </section>
+
+  <footer id="foot"></footer>
+</main>
+
+<script src="/static/common.js"></script>
+<script>
+ET.header("capture"); ET.footer();
+
+const $ = (id) => document.getElementById(id);
+let rec = null, stream = null, recId = null, token = null, mime = "", seq = 0, startedAt = 0;
+let lastPos = null, watchId = null, timerId = null, stopping = false;
+const queue = []; let uploaded = 0, draining = false;
+
+function showMsg(text, kind = "") {
+  const m = $("msg"); m.className = "note " + kind; m.textContent = text;
+}
+function hideMsg() { $("msg").className = "note hide"; }
+
+function pickMime() {
+  const opts = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+  return opts.find((o) => window.MediaRecorder && MediaRecorder.isTypeSupported(o)) || "";
+}
+
+function getPos(timeout = 8000) {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy }),
+      () => resolve(null), { enableHighAccuracy: true, timeout, maximumAge: 5000 });
+  });
+}
+
+function updateTimer() {
+  const s = Math.floor((Date.now() - startedAt) / 1000);
+  $("timer").textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+}
+
+// Upload parts one at a time, in order, retrying if the network drops.
+async function drain() {
+  if (draining) return; draining = true;
+  while (queue.length) {
+    const part = queue[0];
+    try {
+      const q = new URLSearchParams({ seq: part.seq, mime });
+      if (part.pos) { q.set("lat", part.pos.lat); q.set("lon", part.pos.lon); }
+      await ET.api(`/api/records/${recId}/chunk?${q}`, { method: "POST", token, body: part.blob, headers: { "Content-Type": "application/octet-stream" } });
+      queue.shift(); uploaded++;
+      $("up-badge").textContent = `Saved to server: ${uploaded} part${uploaded === 1 ? "" : "s"}`;
+      $("up-badge").className = "badge ok";
+    } catch (e) {
+      $("up-badge").textContent = `Waiting for network (${queue.length} queued)`;
+      $("up-badge").className = "badge warn";
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  draining = false;
+}
+
+async function start() {
+  hideMsg();
+  if (!window.MediaRecorder || !navigator.mediaDevices) {
+    return showMsg("This browser cannot record audio. Try Chrome on Android, or open the page over HTTPS.", "bad");
+  }
+  $("tap").disabled = true;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    $("tap").disabled = false;
+    return showMsg("Microphone permission is needed to record. Allow it in the browser and try again.", "bad");
+  }
+  $("tap").classList.add("live");
+  $("capture-card").querySelector(".capture").classList.add("hide");
+  $("live").classList.remove("hide");
+  startedAt = Date.now(); timerId = setInterval(updateTimer, 500);
+
+  const pos = await getPos(6000);
+  lastPos = pos;
+  $("loc-badge").textContent = pos ? `Location locked (about ${Math.round(pos.accuracy)} m)` : "Location unavailable";
+  $("loc-badge").className = "badge " + (pos ? "ok" : "warn");
+  if (navigator.geolocation) {
+    watchId = navigator.geolocation.watchPosition((p) => {
+      lastPos = { lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy };
+    }, () => {}, { enableHighAccuracy: true, maximumAge: 5000 });
+  }
+
+  mime = pickMime();
+  try {
+    const r = await ET.api("/api/records", { method: "POST", json: {
+      device_time: new Date().toISOString(), lat: pos?.lat ?? null, lon: pos?.lon ?? null, accuracy: pos?.accuracy ?? null, mime } });
+    recId = r.id; token = r.owner_token;
+    ET.saveRecord({ id: recId, token, created: new Date().toISOString() });
+  } catch (e) {
+    cleanup(); return showMsg("Could not reach the server, so nothing was recorded. Check the connection and try again.", "bad");
+  }
+
+  rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  rec.ondataavailable = (e) => {
+    if (e.data && e.data.size) { queue.push({ seq: seq++, blob: e.data, pos: lastPos }); drain(); }
+  };
+  rec.onstop = finishUp;
+  rec.start(5000);
+}
+
+function cleanup() {
+  clearInterval(timerId);
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  $("tap").disabled = false; $("tap").classList.remove("live");
+  $("live").classList.add("hide");
+  $("capture-card").querySelector(".capture").classList.remove("hide");
+}
+
+async function finishUp() {
+  $("stop").disabled = true; $("stop").textContent = "Sealing...";
+  $("rec-badge").textContent = "Saving the last parts";
+  const t0 = Date.now();
+  while ((queue.length || draining) && Date.now() - t0 < 30000) await new Promise((r) => setTimeout(r, 300));
+  if (queue.length) {
+    showMsg("Some parts are still waiting for the network. Your record exists, but the last seconds may be missing. Open it from My records.", "warn");
+  }
+  try { await ET.api(`/api/records/${recId}/finish`, { method: "POST", token }); } catch {}
+  cleanup();
+  location.href = `/record?id=${recId}&new=1`;
+}
+
+$("tap").addEventListener("click", start);
+$("stop").addEventListener("click", () => { if (rec && rec.state !== "inactive") { stopping = true; rec.stop(); } });
+
+// records list
+const list = ET.records();
+if (list.length) {
+  $("rec-empty").classList.add("hide");
+  $("rec-list").innerHTML = list.map((r) =>
+    `<li><span><b>Record ${ET.esc(r.id)}</b><br><span class="tiny">${ET.esc(ET.fmtTime(r.created))}</span></span>` +
+    `<a class="btn ghost small" href="/record?id=${encodeURIComponent(r.id)}">Open</a></li>`).join("");
+}
+</script>
+</body>
+</html>

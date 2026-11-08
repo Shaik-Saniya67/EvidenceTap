@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#FFF8F3">
+<title>Your record - EvidenceTap</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="top" id="top"></div>
+<main class="wrap">
+  <div id="err" class="note bad hide" style="margin-top:18px"></div>
+
+  <section class="hero">
+    <span class="eyebrow" id="eyebrow">Your record</span>
+    <h1 id="title">Record</h1>
+    <p class="muted" id="subtitle"></p>
+  </section>
+
+  <section class="card" id="status-card">
+    <div class="row between">
+      <h2 style="margin:0">Seal</h2>
+      <span id="integrity"></span>
+    </div>
+    <p class="muted" style="margin-top:8px">Fingerprint of the whole record (changes if any file or the order of events is altered):</p>
+    <p class="mono" id="fp"></p>
+    <div id="skew" class="note warn hide"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn ghost small" id="recheck" type="button">Re-check now</button>
+    </div>
+    <div id="map"></div>
+  </section>
+
+  <section class="card" id="audio-card">
+    <h2>Recording</h2>
+    <audio id="player" controls preload="metadata" class="hide"></audio>
+    <p class="muted" id="noaudio">No audio was saved for this record.</p>
+    <p class="row"><a class="btn ghost small hide" id="dl-audio" href="#">Download audio</a></p>
+  </section>
+
+  <section class="card">
+    <h2>Add photos or screenshots</h2>
+    <p class="muted">Messages, a number plate, a signboard, an injury. Each file gets its own fingerprint and time.</p>
+    <input type="file" id="photo" accept="image/*" multiple>
+    <div class="thumbs" id="thumbs"></div>
+  </section>
+
+  <section class="card">
+    <h2>What happened</h2>
+    <p class="muted">Every save is kept as a new timestamped version. Earlier versions are never overwritten.</p>
+    <label for="itype">Type of incident</label>
+    <select id="itype">
+      <option value="">Choose one</option>
+      <option>Harassment on the street</option>
+      <option>Harassment in transport</option>
+      <option>Stalking or following</option>
+      <option>Online harassment or threats</option>
+      <option>Workplace or college harassment</option>
+      <option>Threat or intimidation</option>
+      <option>Other</option>
+    </select>
+    <label for="desc">Describe it in your own words</label>
+    <textarea id="desc" placeholder="What happened, where, and what was said"></textarea>
+    <label for="people">People or vehicles involved (optional)</label>
+    <textarea id="people" style="min-height:64px" placeholder="Names, descriptions, number plates, handles"></textarea>
+    <label for="safety">How are you now?</label>
+    <select id="safety">
+      <option value="">Prefer not to say</option>
+      <option>I am safe now</option>
+      <option>I am not sure I am safe</option>
+      <option>I need medical help</option>
+      <option>I need police help now</option>
+    </select>
+    <div class="row" style="margin-top:14px"><button class="btn" id="save" type="button">Save details</button><span class="tiny" id="saved"></span></div>
+  </section>
+
+  <section class="card">
+    <h2>Share with someone you trust</h2>
+    <p class="muted">They get a private link. You choose how much they can see, and you can stop sharing by deleting the record.</p>
+    <label for="cname">Their name</label>
+    <input type="text" id="cname" placeholder="For example, Amma or Priya" autocomplete="off">
+    <label class="radio"><input type="radio" name="scope" value="location" checked><span><b>Location only</b>They see where you are and a live position while recording. No audio or photos.</span></label>
+    <label class="radio"><input type="radio" name="scope" value="full"><span><b>Location and evidence</b>They can also play the audio and see photos and your notes.</span></label>
+    <label for="tg">Telegram chat ID (optional)</label>
+    <input type="text" id="tg" placeholder="Only works if the server has a Telegram bot set up" inputmode="numeric" autocomplete="off">
+    <div class="row" style="margin-top:14px"><button class="btn" id="share" type="button">Create share link</button></div>
+    <div id="share-out" class="hide" style="margin-top:14px">
+      <p class="mono" id="share-url"></p>
+      <div class="row">
+        <button class="btn ghost small" id="copy" type="button">Copy link</button>
+        <a class="btn small" id="wa" target="_blank" rel="noopener">Send on WhatsApp</a>
+      </div>
+      <p class="tiny" id="tg-note"></p>
+    </div>
+    <div id="ack" class="note hide" style="margin-top:12px"></div>
+  </section>
+
+  <section class="card">
+    <h2>Make a complaint-ready PDF</h2>
+    <p class="muted">A summary with times, place, your notes, every file's fingerprint and a QR code anyone can scan to verify it.</p>
+    <button class="btn" id="pdf" type="button">Download PDF</button>
+  </section>
+
+  <section class="card">
+    <h2>Evidence chain</h2>
+    <p class="muted">Each row is linked to the one before it. If any file is edited later, the check above fails.</p>
+    <div style="overflow-x:auto"><table id="chain"><thead><tr><th>#</th><th>Type</th><th>Time</th><th>SHA-256</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section class="card soft">
+    <h2>Delete this record</h2>
+    <p class="muted">Removes the files and the record from the server for good. The share link stops working.</p>
+    <button class="btn danger small" id="del" type="button">Delete everything</button>
+  </section>
+
+  <footer id="foot"></footer>
+</main>
+
+<script src="/static/common.js"></script>
+<script>
+ET.header("records"); ET.footer();
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const rid = params.get("id");
+const token = ET.tokenFor(rid);
+let data = null;
+
+function fail(msg) {
+  const e = $("err"); e.textContent = msg; e.classList.remove("hide");
+  document.querySelectorAll("main > section").forEach((s) => { if (!s.classList.contains("hero")) s.classList.add("hide"); });
+}
+if (!rid) fail("No record selected.");
+else if (!token) fail("This record is not linked to this device, so it cannot be opened here.");
+else load();
+
+async function load() {
+  try { data = await ET.api(`/api/records/${rid}`, { token }); }
+  catch (e) { return fail(e.status === 404 ? "This record no longer exists." : "Could not open this record: " + e.message); }
+  render();
+  checkIntegrity();
+}
+
+function render() {
+  $("eyebrow").textContent = params.get("new") ? "Sealed just now" : "Your record";
+  $("title").textContent = "Record " + data.id;
+  $("subtitle").textContent = "Created " + ET.fmtTime(data.created_at) + (data.status === "recording" ? " (recording was not finished)" : "");
+  $("fp").textContent = data.fingerprint || "";
+  if (data.clock_skew_s !== null && Math.abs(data.clock_skew_s) > 120) {
+    const s = $("skew"); s.classList.remove("hide");
+    s.textContent = `Your phone's clock was ${Math.abs(Math.round(data.clock_skew_s))} seconds ${data.clock_skew_s > 0 ? "ahead of" : "behind"} the server. The server time is the one that counts in this record.`;
+  }
+  const lat = data.last_lat ?? data.lat, lon = data.last_lon ?? data.lon;
+  $("map").innerHTML = lat != null ? `<p class="muted" style="margin:12px 0 0">Recorded location</p>` + ET.mapEmbed(lat, lon) : `<p class="muted" style="margin-top:12px">No location was captured.</p>`;
+  if (data.has_audio) {
+    $("player").src = `/api/records/${rid}/audio?t=${encodeURIComponent(token)}`;
+    $("player").classList.remove("hide"); $("noaudio").classList.add("hide");
+    $("dl-audio").href = $("player").src; $("dl-audio").classList.remove("hide");
+  }
+  $("itype").value = data.incident_type || ""; $("desc").value = data.description || "";
+  $("people").value = data.people || ""; $("safety").value = data.safety_status || "";
+  $("cname").value = data.contact_name || ""; $("tg").value = data.telegram_chat || "";
+  if (data.share_scope && data.share_scope !== "none") {
+    document.querySelector(`input[name=scope][value=${data.share_scope}]`).checked = true;
+    showShare(`${location.origin}/s/${data.share_token}`);
+  }
+  showAck();
+  renderChain();
+}
+
+function renderChain() {
+  const items = data.items || [];
+  $("chain").tBodies[0].innerHTML = items.map((it, i) =>
+    `<tr><td>${i + 1}</td><td>${ET.esc(it.kind)}</td><td>${ET.esc(ET.fmtTime(it.server_time))}</td><td class="mono">${ET.esc(ET.short(it.sha256, 12))}</td></tr>`).join("");
+  const photos = items.filter((i) => i.kind === "photo");
+  $("thumbs").innerHTML = photos.map((p) =>
+    `<img alt="Uploaded photo ${p.id}" src="/api/records/${rid}/photo/${p.id}?t=${encodeURIComponent(token)}">`).join("");
+}
+
+async function checkIntegrity() {
+  $("integrity").innerHTML = `<span class="badge plain">Checking...</span>`;
+  try { $("integrity").innerHTML = ET.integrityBadge(await ET.api(`/api/records/${rid}/integrity`, { token })); }
+  catch { $("integrity").innerHTML = `<span class="badge warn">Could not check</span>`; }
+}
+$("recheck").addEventListener("click", checkIntegrity);
+
+async function refresh() { data = await ET.api(`/api/records/${rid}`, { token }); $("fp").textContent = data.fingerprint || ""; renderChain(); showAck(); checkIntegrity(); }
+
+$("photo").addEventListener("change", async (e) => {
+  for (const f of e.target.files) {
+    const fd = new FormData(); fd.append("file", f);
+    try { await ET.api(`/api/records/${rid}/photo`, { method: "POST", token, body: fd }); ET.toast("Photo added"); }
+    catch (err) { ET.toast("Could not add " + f.name + ": " + err.message, 4000); }
+  }
+  e.target.value = ""; refresh();
+});
+
+$("save").addEventListener("click", async () => {
+  try {
+    const r = await ET.api(`/api/records/${rid}/details`, { method: "POST", token, json: {
+      incident_type: $("itype").value, description: $("desc").value, people: $("people").value, safety_status: $("safety").value } });
+    $("saved").textContent = "Saved as version " + r.version; ET.toast("Details saved"); refresh();
+  } catch (e) { ET.toast("Could not save: " + e.message, 4000); }
+});
+
+function showShare(url) {
+  $("share-out").classList.remove("hide"); $("share-url").textContent = url;
+  const who = $("cname").value.trim();
+  const text = `${who ? who + ", " : ""}please open this private link. I may need help and I am sharing my location: ${url}`;
+  $("wa").href = "https://wa.me/?text=" + encodeURIComponent(text);
+  $("copy").onclick = () => ET.copy(url);
+}
+$("share").addEventListener("click", async () => {
+  try {
+    const scope = document.querySelector("input[name=scope]:checked").value;
+    const r = await ET.api(`/api/records/${rid}/share`, { method: "POST", token, json: { scope, contact_name: $("cname").value, telegram_chat: $("tg").value } });
+    showShare(r.url);
+    $("tg-note").textContent = $("tg").value.trim()
+      ? (r.telegram_configured ? "A Telegram message was sent to that chat." : "This server has no Telegram bot set up, so use WhatsApp or copy the link.") : "";
+    ET.toast("Share link ready");
+  } catch (e) { ET.toast("Could not create the link: " + e.message, 4000); }
+});
+
+function showAck() {
+  const a = $("ack");
+  if (!data.ack_status) return a.classList.add("hide");
+  const label = { responding: "is responding", calling: "is calling you", informed_authorities: "has informed the authorities" }[data.ack_status];
+  a.classList.remove("hide"); a.textContent = `Your trusted contact ${label} (${ET.fmtTime(data.ack_at)}).`;
+}
+setInterval(async () => { try { data = await ET.api(`/api/records/${rid}`, { token }); showAck(); } catch {} }, 10000);
+
+$("pdf").addEventListener("click", async () => {
+  try {
+    const res = await ET.api(`/api/records/${rid}/pdf`, { token });
+    const blob = await res.blob(); const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = `evidencetap-${rid}.pdf`; a.click();
+  } catch (e) { ET.toast("Could not make the PDF: " + e.message, 4000); }
+});
+
+$("del").addEventListener("click", async () => {
+  if (!confirm("Delete this record and all its files permanently? This cannot be undone.")) return;
+  try { await ET.api(`/api/records/${rid}`, { method: "DELETE", token }); ET.removeRecord(rid); location.href = "/"; }
+  catch (e) { ET.toast("Could not delete: " + e.message, 4000); }
+});
+</script>
+</body>
+</html>

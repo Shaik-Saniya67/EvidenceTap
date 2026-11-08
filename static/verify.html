@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#FFF8F3">
+<title>Verify a record - EvidenceTap</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="top" id="top"></div>
+<main class="wrap">
+  <section class="hero">
+    <span class="eyebrow">Verify</span>
+    <h1>Has this file been changed?</h1>
+    <p class="lead">Anyone can check. Pick a file and EvidenceTap tells you whether it is exactly what was recorded. The file never leaves your device; only its fingerprint is checked.</p>
+  </section>
+
+  <section class="card hide" id="rec-card">
+    <h2>Record <span id="rid"></span></h2>
+    <p class="muted" id="rec-when"></p>
+    <p id="rec-integrity"></p>
+    <p id="fp-match"></p>
+    <p class="tiny">This checks every stored file against the fingerprints sealed when each one was captured.</p>
+  </section>
+
+  <section class="card">
+    <h2>Check a file</h2>
+    <label for="file">Audio, photo or screenshot</label>
+    <input type="file" id="file">
+    <div id="result" style="margin-top:14px" aria-live="polite"></div>
+  </section>
+
+  <section class="card soft">
+    <h2>What this does and does not show</h2>
+    <p class="muted" style="margin:0">A match means the file is byte-for-byte what was saved at the time shown. It does not prove what the recording says is true, and it is not legal advice.</p>
+  </section>
+
+  <footer id="foot"></footer>
+</main>
+
+<script src="/static/common.js"></script>
+<script>
+ET.header("verify"); ET.footer();
+const $ = (id) => document.getElementById(id);
+const p = new URLSearchParams(location.search);
+
+async function hashFile(file) {
+  const buf = await file.arrayBuffer();
+  const d = await crypto.subtle.digest("SHA-256", buf);
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+$("file").addEventListener("change", async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const out = $("result"); out.innerHTML = `<span class="badge plain">Checking...</span>`;
+  try {
+    const hex = await hashFile(f);
+    const r = await ET.api(`/api/verify/hash/${hex}`);
+    if (r.matches.length) {
+      out.innerHTML = r.matches.map((m) =>
+        `<div class="note" style="border-color:var(--ok);background:var(--ok-bg)"><b>Match.</b> This ${ET.esc(m.kind)} is exactly what was recorded in record ${ET.esc(m.record_id)} at ${ET.esc(ET.fmtTime(m.recorded_at))}.</div>`).join("") +
+        `<p class="mono" style="margin-top:10px">${hex}</p>`;
+    } else {
+      out.innerHTML = `<div class="note bad"><b>No match.</b> This file is not in any record. It may have been edited, re-saved or re-compressed, or it was never recorded here.</div>` +
+        `<p class="mono" style="margin-top:10px">${hex}</p>`;
+    }
+  } catch (err) {
+    out.innerHTML = `<div class="note warn">Could not check this file: ${ET.esc(err.message)}. Fingerprinting needs a secure (HTTPS) page.</div>`;
+  }
+});
+
+(async () => {
+  const rid = p.get("record"); if (!rid) return;
+  $("rec-card").classList.remove("hide"); $("rid").textContent = rid;
+  try {
+    const r = await ET.api(`/api/verify/record/${encodeURIComponent(rid)}${p.get("fp") ? "?fp=" + encodeURIComponent(p.get("fp")) : ""}`);
+    $("rec-when").textContent = "Created " + ET.fmtTime(r.created_at);
+    $("rec-integrity").innerHTML = ET.integrityBadge(r.integrity);
+    if (r.fingerprint_matches_pdf !== null) {
+      $("fp-match").innerHTML = r.fingerprint_matches_pdf
+        ? `<span class="badge ok">The fingerprint on the PDF matches this record</span>`
+        : `<span class="badge bad">The fingerprint on the PDF does not match the record as it is now</span>`;
+    }
+  } catch { $("rec-integrity").innerHTML = `<span class="badge warn">This record was not found. It may have been deleted.</span>`; }
+})();
+</script>
+</body>
+</html>
