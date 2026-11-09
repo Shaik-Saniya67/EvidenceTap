@@ -25,6 +25,14 @@ def ok(cond, msg):
 for path in ("/", "/verify", "/record?id=x", "/s/abc", "/static/style.css", "/static/common.js", "/health"):
     ok(c.get(path).status_code == 200, f"GET {path}")
 
+# Exit Call is a client-side simulation served by the home page.
+home = c.get("/")
+ok('id="start-fake-call"' in home.text and 'id="fake-call-overlay"' in home.text,
+   "home page includes Exit Call entry point and overlay")
+fake_js = c.get("/static/fake-call.js")
+ok(fake_js.status_code == 200 and "updateDuration" in fake_js.text and "setInterval" in fake_js.text,
+   "Exit Call interaction script is served")
+
 # 1. create + chunks + finish
 r = c.post("/api/records", json={"device_time": "2020-01-01T00:00:00Z", "lat": 13.2, "lon": 79.1,
                                   "accuracy": 12, "mime": "audio/webm"}).json()

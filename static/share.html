@@ -66,7 +66,9 @@ async function load() {
   catch (e) { return fail("This link is not active. It may have been stopped or deleted."); }
 
   $("live-badge").innerHTML = d.status === "recording"
-    ? `<span class="badge warn">Recording right now</span>` : `<span class="badge ok">Recording finished</span>`;
+    ? `<span class="badge warn">Recording right now</span>`
+    : d.status === "incomplete" ? `<span class="badge warn">Recording ended, some audio is missing</span>`
+    : `<span class="badge ok">Recording finished</span>`;
   $("when").textContent = "Started " + ET.fmtTime(d.created_at) + ".";
   const lat = d.last_lat ?? d.lat, lon = d.last_lon ?? d.lon;
   $("map").innerHTML = lat != null ? ET.mapEmbed(lat, lon) : `<p class="muted">No location was captured.</p>`;

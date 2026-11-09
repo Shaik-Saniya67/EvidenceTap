@@ -18,6 +18,7 @@ from pathlib import Path
 
 import qrcode
 from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from reportlab.lib import colors
@@ -35,9 +36,12 @@ FILES.mkdir(parents=True, exist_ok=True)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 DEMO_MODE = os.environ.get("EVIDENCETAP_DEMO", "") == "1"
 MAX_UPLOAD = 25 * 1024 * 1024  # 25 MB per file
+MAX_SEQ = 100_000  # highest accepted audio chunk number
+BUSY_TIMEOUT_S = 30  # how long a write waits for SQLite's write lock before failing
+# Render's free tier wipes local files on restart/spin-down. Warn users unless a persistent disk is attached.
+TEMP_STORAGE = os.environ.get("EVIDENCETAP_TEMP_STORAGE", "1") != "0"
 
 app = FastAPI(title="EvidenceTap")
-_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------- database
@@ -90,6 +94,29 @@ def db():
         con.close()
 
 
+@contextmanager
+def write_txn():
+    """One serialised write transaction.
+
+    BEGIN IMMEDIATE takes SQLite's write lock up front, so concurrent uploads and finish
+    requests queue instead of interleaving (this also holds across worker processes).
+    Any exception, including HTTPException, rolls everything back.
+    """
+    con = sqlite3.connect(DB_PATH, timeout=BUSY_TIMEOUT_S, isolation_level=None)
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            yield con
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
+        else:
+            con.execute("COMMIT")
+    finally:
+        con.close()
+
+
 with db() as _c:
     _c.executescript(SCHEMA)
 
@@ -125,6 +152,16 @@ def record_dir(rid: str) -> Path:
     return d
 
 
+def atomic_write(path: Path, data: bytes):
+    """Write to a temporary file, flush it to disk, then rename. A crash never leaves a half-written file."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def get_record(con, rid: str):
     row = con.execute("SELECT * FROM records WHERE id=?", (rid,)).fetchone()
     if not row:
@@ -150,26 +187,27 @@ def require_owner(con, rid: str, token: str | None):
 
 
 def add_item(con, rid: str, kind: str, filename: str, data: bytes, meta: dict | None = None):
-    """Write a file and append it to the record's hash chain. Items are never edited."""
+    """Append a file to the record's hash chain. Items are never edited.
+
+    Must be called inside write_txn(): the transaction (not this function) commits, so the row,
+    the chain link and any status change that follows are saved together or not at all.
+    """
     if len(data) > MAX_UPLOAD:
         raise HTTPException(413, "File too large (25 MB max)")
     meta_s = json.dumps(meta or {}, sort_keys=True, separators=(",", ":"))
-    path = record_dir(rid) / filename
-    with _lock:
-        path.write_bytes(data)
-        sha = sha256_bytes(data)
-        t = now_iso()
-        last = con.execute(
-            "SELECT chain_hash FROM items WHERE record_id=? ORDER BY id DESC LIMIT 1", (rid,)
-        ).fetchone()
-        prev = last["chain_hash"] if last else genesis(rid)
-        ch = chain_step(prev, sha, t, kind, meta_s)
-        cur = con.execute(
-            "INSERT INTO items(record_id,kind,filename,sha256,size,server_time,meta,chain_hash)"
-            " VALUES (?,?,?,?,?,?,?,?)",
-            (rid, kind, filename, sha, len(data), t, meta_s, ch),
-        )
-        con.commit()
+    sha = sha256_bytes(data)
+    t = now_iso()
+    last = con.execute(
+        "SELECT chain_hash FROM items WHERE record_id=? ORDER BY id DESC LIMIT 1", (rid,)
+    ).fetchone()
+    prev = last["chain_hash"] if last else genesis(rid)
+    ch = chain_step(prev, sha, t, kind, meta_s)
+    cur = con.execute(
+        "INSERT INTO items(record_id,kind,filename,sha256,size,server_time,meta,chain_hash)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        (rid, kind, filename, sha, len(data), t, meta_s, ch),
+    )
+    atomic_write(record_dir(rid) / filename, data)  # if this fails, the transaction rolls the row back
     return {"id": cur.lastrowid, "sha256": sha, "server_time": t, "chain_hash": ch}
 
 
@@ -258,7 +296,7 @@ async def create_record(request: Request):
             skew = round((d - datetime.fromisoformat(created)).total_seconds(), 1)
         except Exception:
             pass
-    with db() as con:
+    with write_txn() as con:
         con.execute(
             "INSERT INTO records(id,owner_hash,share_token,created_at,device_time,clock_skew_s,"
             "lat,lon,accuracy,last_lat,last_lon,last_pos_at,mime) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -274,46 +312,132 @@ async def create_record(request: Request):
     return {"id": rid, "owner_token": owner, "share_token": share}
 
 
-@app.post("/api/records/{rid}/chunk")
-async def upload_chunk(rid: str, request: Request, seq: int, mime: str = "", lat: float | None = None,
-                       lon: float | None = None, x_token: str | None = Header(None)):
-    data = await request.body()
-    if not data:
-        raise HTTPException(400, "Empty chunk")
-    with db() as con:
-        row = require_owner(con, rid, x_token)
+def chunk_name(seq: int) -> str:
+    return f"chunk_{seq:05d}.part"
+
+
+def _store_chunk(rid: str, token: str | None, seq: int, mime: str, lat, lon, data: bytes):
+    """Accept one audio chunk. Idempotent: the same bytes for the same seq are a harmless retry."""
+    with write_txn() as con:
+        row = require_owner(con, rid, token)
         if row["status"] != "recording":
             raise HTTPException(409, "Recording already finished")
+        sha = sha256_bytes(data)
+        path = record_dir(rid) / chunk_name(seq)
+        existing = con.execute(
+            "SELECT * FROM items WHERE record_id=? AND kind='audio_chunk' AND filename=? ORDER BY id LIMIT 1",
+            (rid, chunk_name(seq))).fetchone()
+        if existing:
+            if existing["sha256"] != sha:
+                # Never replace evidence that was already accepted.
+                raise HTTPException(409, detail={
+                    "error": "conflicting_chunk", "seq": seq,
+                    "message": f"Part {seq} was already saved with different content, so this copy was refused."})
+            repaired = False
+            if not path.exists() or sha256_file(path) != existing["sha256"]:
+                atomic_write(path, data)  # identical bytes: safe to restore a lost or damaged file
+                repaired = True
+            return {"ok": True, "seq": seq, "sha256": sha, "duplicate": True, "repaired": repaired}
         meta = {"seq": seq, "mime": mime, "lat": lat, "lon": lon}
-        res = add_item(con, rid, "audio_chunk", f"chunk_{seq:05d}.part", data, meta)
+        res = add_item(con, rid, "audio_chunk", chunk_name(seq), data, meta)
         if lat is not None and lon is not None:
             con.execute("UPDATE records SET last_lat=?,last_lon=?,last_pos_at=?,mime=? WHERE id=?",
                         (lat, lon, res["server_time"], mime, rid))
-    return {"ok": True, "seq": seq, "sha256": res["sha256"]}
+    return {"ok": True, "seq": seq, "sha256": res["sha256"], "duplicate": False}
+
+
+@app.post("/api/records/{rid}/chunk")
+async def upload_chunk(rid: str, request: Request, seq: int = Query(..., ge=0, le=MAX_SEQ), mime: str = "",
+                       lat: float | None = None, lon: float | None = None,
+                       x_token: str | None = Header(None)):
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "Empty chunk")
+    # The database work is blocking, so keep it off the event loop.
+    return await run_in_threadpool(_store_chunk, rid, x_token, seq, mime, lat, lon, data)
 
 
 @app.post("/api/records/{rid}/finish")
-def finish(rid: str, x_token: str | None = Header(None)):
-    with db() as con:
+def finish(rid: str, total: int | None = Query(None, ge=0, le=MAX_SEQ + 1), force: bool = False,
+           x_token: str | None = Header(None)):
+    """Seal a recording.
+
+    The whole check-and-build runs inside one write transaction, so it cannot race with uploads or with
+    another finish request. A repeated finish returns the existing result and never rebuilds the audio.
+
+    total: how many chunks the client produced. Without it only gaps *inside* the received range can be
+           detected, not chunks lost off the end.
+    force: explicitly seal an incomplete recording. It is stored with status 'incomplete', the audio holds
+           only the verified, contiguous part, and every received chunk is kept as evidence.
+    """
+    with write_txn() as con:
         row = require_owner(con, rid, x_token)
-        if row["status"] == "recording":
-            chunks = con.execute(
-                "SELECT * FROM items WHERE record_id=? AND kind='audio_chunk' ORDER BY id", (rid,)).fetchall()
-            if chunks:
-                mime = json.loads(chunks[0]["meta"]).get("mime", "") or row["mime"]
-                ext = "mp4" if "mp4" in mime else "ogg" if "ogg" in mime else "webm"
-                buf = b"".join((record_dir(rid) / c["filename"]).read_bytes() for c in chunks)
-                add_item(con, rid, "audio", f"audio.{ext}", buf,
-                         {"chunks": len(chunks), "mime": mime})
-            con.execute("UPDATE records SET status='sealed' WHERE id=?", (rid,))
-        row = get_record(con, rid)
-        return record_view(con, row, "owner")
+        if row["status"] in ("sealed", "incomplete"):
+            return record_view(con, row, "owner")
+
+        by_seq = {}
+        for c in con.execute(
+                "SELECT * FROM items WHERE record_id=? AND kind='audio_chunk' ORDER BY id", (rid,)):
+            by_seq.setdefault(json.loads(c["meta"]).get("seq"), c)  # oldest row wins (legacy duplicates)
+        received = sorted(by_seq)
+        expected = total if total is not None else (received[-1] + 1 if received else 0)
+        missing = [s for s in range(expected) if s not in by_seq]
+        unexpected = [s for s in received if s >= expected]
+
+        good, damaged = {}, []  # verified bytes by seq / seqs whose file is missing or fails its hash
+        for s in range(expected):
+            if s not in by_seq:
+                continue
+            p = record_dir(rid) / by_seq[s]["filename"]
+            try:
+                data = p.read_bytes()
+            except OSError:
+                damaged.append(s)
+                continue
+            if sha256_bytes(data) != by_seq[s]["sha256"]:
+                damaged.append(s)
+            else:
+                good[s] = data
+
+        complete = bool(received) and not (missing or damaged or unexpected)
+        if not complete and not force:
+            parts = []
+            if not received:
+                parts.append("no audio parts were saved")
+            if missing:
+                parts.append("missing part(s): " + ", ".join(map(str, missing)))
+            if damaged:
+                parts.append("damaged or lost part(s): " + ", ".join(map(str, damaged)))
+            if unexpected:
+                parts.append("part(s) beyond the declared total: " + ", ".join(map(str, unexpected)))
+            raise HTTPException(409, detail={
+                "error": "incomplete_recording" if received else "no_chunks",
+                "message": "Not sealed: " + "; ".join(parts) + ". Nothing was discarded.",
+                "expected": expected, "received": len(received),
+                "missing": missing, "damaged": damaged, "unexpected": unexpected})
+
+        prefix = []  # only the contiguous, verified run from part 0 goes into the combined audio
+        for s in range(expected):
+            if s in good:
+                prefix.append(s)
+            else:
+                break
+        if prefix:
+            mime = json.loads(by_seq[prefix[0]]["meta"]).get("mime", "") or row["mime"]
+            ext = "mp4" if "mp4" in mime else "ogg" if "ogg" in mime else "webm"
+            add_item(con, rid, "audio", f"audio.{ext}", b"".join(good[s] for s in prefix), {
+                "chunks": len(prefix), "mime": mime, "complete": complete,
+                "missing": missing, "damaged": damaged, "unexpected": unexpected,
+                "total_declared": total is not None,
+                "source_digest": sha256_bytes("|".join(by_seq[s]["sha256"] for s in prefix).encode())})
+        con.execute("UPDATE records SET status=? WHERE id=?", ("sealed" if complete else "incomplete", rid))
+        return record_view(con, get_record(con, rid), "owner")
 
 
 @app.post("/api/records/{rid}/photo")
 async def upload_photo(rid: str, file: UploadFile = File(...), x_token: str | None = Header(None)):
     data = await file.read()
-    with db() as con:
+    with write_txn() as con:
         require_owner(con, rid, x_token)
         n = con.execute("SELECT COUNT(*) c FROM items WHERE record_id=? AND kind='photo'", (rid,)).fetchone()["c"]
         ext = (Path(file.filename or "").suffix or ".jpg").lower()[:6]
@@ -330,7 +454,7 @@ async def save_details(rid: str, request: Request, x_token: str | None = Header(
     body = await request.json()
     fields = {k: str(body.get(k, ""))[:2000] for k in
               ("incident_type", "description", "people", "safety_status")}
-    with db() as con:
+    with write_txn() as con:
         require_owner(con, rid, x_token)
         n = con.execute("SELECT COUNT(*) c FROM items WHERE record_id=? AND kind='note'", (rid,)).fetchone()["c"]
         add_item(con, rid, "note", f"note_{n + 1}.json", json.dumps(fields, sort_keys=True).encode(),
@@ -639,4 +763,5 @@ def share_page(share_token: str):
 
 @app.get("/health")
 def health():
-    return JSONResponse({"ok": True, "demo_mode": DEMO_MODE, "telegram": bool(TELEGRAM_TOKEN)})
+    return JSONResponse({"ok": True, "demo_mode": DEMO_MODE, "telegram": bool(TELEGRAM_TOKEN),
+                         "temporary_storage": TEMP_STORAGE})

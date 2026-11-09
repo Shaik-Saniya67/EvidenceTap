@@ -27,9 +27,14 @@ const ET = (() => {
     if (json !== undefined) { h["Content-Type"] = "application/json"; b = JSON.stringify(json); }
     const res = await fetch(path, { method, headers: h, body: b });
     if (!res.ok) {
-      let msg = res.statusText;
-      try { msg = (await res.json()).detail || msg; } catch {}
-      const e = new Error(msg); e.status = res.status; throw e;
+      let msg = res.statusText, detail = null;
+      try {
+        detail = (await res.json()).detail;
+        if (typeof detail === "string") msg = detail;
+        else if (Array.isArray(detail)) msg = detail.map((d) => d.msg).join("; ");
+        else if (detail && typeof detail === "object") msg = detail.message || detail.error || msg;
+      } catch {}
+      const e = new Error(msg); e.status = res.status; e.detail = detail; throw e;
     }
     const ct = res.headers.get("content-type") || "";
     return ct.includes("application/json") ? res.json() : res;
@@ -58,6 +63,20 @@ const ET = (() => {
     document.getElementById("top").innerHTML =
       `<div class="wrap"><a class="brand" href="/"><span class="dot"></span><b>EvidenceTap</b></a>` +
       `<nav aria-label="Main">${links.map(([h, l, k]) => `<a href="${h}" class="${k === active ? "on" : ""}">${l}</a>`).join("")}</nav></div>`;
+    storageBanner();
+  }
+  // Free hosting wipes local files on restart or sleep. Say so, so nobody trusts the demo server with the only copy.
+  async function storageBanner() {
+    try {
+      const h = await (await fetch("/health")).json();
+      const main = document.querySelector("main");
+      if (!h.temporary_storage || !main || document.getElementById("temp-banner")) return;
+      const d = document.createElement("div");
+      d.id = "temp-banner"; d.className = "note warn"; d.style.margin = "14px 0 0";
+      d.innerHTML = "<b>Demo server.</b> Records are kept on a temporary disk and can disappear when the server restarts or sleeps " +
+        "(after about 15 minutes without visitors). Download your PDF and audio if you need to keep them.";
+      main.prepend(d);
+    } catch {}
   }
   function footer() {
     const f = document.getElementById("foot");

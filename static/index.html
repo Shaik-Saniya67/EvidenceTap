@@ -35,6 +35,14 @@
         <button class="btn" id="stop" type="button">Stop and seal the record</button>
       </div>
       <p class="tiny" style="text-align:center;margin-top:10px">Keep this page open. Each 5-second part is uploaded as it is recorded, so earlier parts are safe even if the phone is lost.</p>
+      <div id="recover" class="note warn hide" role="alert" style="margin-top:14px">
+        <p id="recover-text" style="margin:0 0 10px"></p>
+        <div class="row">
+          <button class="btn small" id="retry-btn" type="button">Retry saving</button>
+          <button class="btn ghost small" id="incomplete-btn" type="button">Seal as incomplete</button>
+        </div>
+        <p class="tiny" style="margin:10px 0 0">Nothing is discarded unless you choose. Keep this page open: parts that are not saved yet are held in this tab only.</p>
+      </div>
     </div>
 
     <div id="msg" class="note hide" role="alert"></div>
@@ -43,6 +51,39 @@
       Recording is always visible here, and your phone will show its microphone indicator. EvidenceTap does not record in secret.
     </div>
   </section>
+
+
+  <section class="card exit-call-card" id="exit-call">
+    <div class="exit-call-heading"><span class="eyebrow">Quick exit tool</span><span class="badge plain">Optional simulation</span></div>
+    <h2>Need a reason to step away?</h2>
+    <p class="muted">Start a simulated incoming call on this screen. It can give you a moment to leave a conversation or situation.</p>
+    <button class="btn" id="start-fake-call" type="button">Simulate an incoming call</button>
+    <p class="tiny" style="margin:10px 0 0">This is only an on-screen simulation. It does not place or receive a real phone call.</p>
+  </section>
+
+  <div class="call-overlay hide" id="fake-call-overlay" role="dialog" aria-modal="true" aria-labelledby="fake-call-title" aria-describedby="fake-call-description">
+    <div class="phone-screen">
+      <div class="phone-status"><span>EvidenceTap simulation</span><span aria-hidden="true">● ● ●</span></div>
+      <div class="call-content" id="incoming-call">
+        <div class="caller-avatar" aria-hidden="true">☎</div><p class="call-kicker">Incoming simulated call</p>
+        <h2 id="fake-call-title">Unknown caller</h2><p class="call-subtitle" id="fake-call-description">This is a pretend call screen, not a real phone call.</p>
+        <div class="call-actions">
+          <button class="call-action decline" id="decline-fake-call" type="button"><span aria-hidden="true">✕</span><span>Decline</span></button>
+          <button class="call-action accept" id="accept-fake-call" type="button"><span aria-hidden="true">☎</span><span>Accept</span></button>
+        </div>
+      </div>
+      <div class="call-content hide" id="active-fake-call">
+        <div class="caller-avatar" aria-hidden="true">☎</div><p class="call-kicker">Simulated call</p><h2>Unknown caller</h2>
+        <p class="call-duration" id="fake-call-duration">00:00</p>
+        <div class="call-controls">
+          <button class="call-control" id="fake-call-mute" type="button" aria-pressed="false"><span aria-hidden="true">🎙</span><span>Mute</span></button>
+          <button class="call-control" id="fake-call-speaker" type="button" aria-pressed="false"><span aria-hidden="true">🔊</span><span>Speaker</span></button>
+        </div>
+        <button class="call-action decline end-call" id="end-fake-call" type="button"><span aria-hidden="true">☎</span><span>End simulated call</span></button>
+      </div>
+      <p class="simulation-disclaimer">SIMULATION ONLY · No real call is connected</p>
+    </div>
+  </div>
 
   <section>
     <h2>How it protects the record</h2>
@@ -64,13 +105,15 @@
 </main>
 
 <script src="/static/common.js"></script>
+<script src="/static/uploader.js"></script>
+<script src="/static/fake-call.js" defer></script>
 <script>
 ET.header("capture"); ET.footer();
 
 const $ = (id) => document.getElementById(id);
 let rec = null, stream = null, recId = null, token = null, mime = "", seq = 0, startedAt = 0;
 let lastPos = null, watchId = null, timerId = null, stopping = false;
-const queue = []; let uploaded = 0, draining = false;
+let uploader = null, leaving = false;
 
 function showMsg(text, kind = "") {
   const m = $("msg"); m.className = "note " + kind; m.textContent = text;
@@ -96,25 +139,23 @@ function updateTimer() {
   $("timer").textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
 }
 
-// Upload parts one at a time, in order, retrying if the network drops.
-async function drain() {
-  if (draining) return; draining = true;
-  while (queue.length) {
-    const part = queue[0];
-    try {
+// Parts are uploaded one at a time, in order. Temporary failures are retried with a growing delay;
+// a part that still fails is kept (never discarded) and the user chooses what to do. See uploader.js.
+function renderUploadState(c) {
+  const b = $("up-badge");
+  if (c.failed) { b.textContent = `${c.failed} part${c.failed === 1 ? "" : "s"} not saved yet`; b.className = "badge bad"; }
+  else if (c.pending || c.uploading) { b.textContent = `Saving... ${c.uploaded} saved, ${c.pending + c.uploading} waiting`; b.className = "badge warn"; }
+  else { b.textContent = `Saved to server: ${c.uploaded} part${c.uploaded === 1 ? "" : "s"}`; b.className = "badge ok"; }
+}
+function makeUploader() {
+  return ChunkUploader.createUploader({
+    onChange: renderUploadState,
+    send: (part) => {
       const q = new URLSearchParams({ seq: part.seq, mime });
       if (part.pos) { q.set("lat", part.pos.lat); q.set("lon", part.pos.lon); }
-      await ET.api(`/api/records/${recId}/chunk?${q}`, { method: "POST", token, body: part.blob, headers: { "Content-Type": "application/octet-stream" } });
-      queue.shift(); uploaded++;
-      $("up-badge").textContent = `Saved to server: ${uploaded} part${uploaded === 1 ? "" : "s"}`;
-      $("up-badge").className = "badge ok";
-    } catch (e) {
-      $("up-badge").textContent = `Waiting for network (${queue.length} queued)`;
-      $("up-badge").className = "badge warn";
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-  }
-  draining = false;
+      return ET.api(`/api/records/${recId}/chunk?${q}`, { method: "POST", token, body: part.blob, headers: { "Content-Type": "application/octet-stream" } });
+    },
+  });
 }
 
 async function start() {
@@ -154,35 +195,73 @@ async function start() {
     cleanup(); return showMsg("Could not reach the server, so nothing was recorded. Check the connection and try again.", "bad");
   }
 
+  uploader = makeUploader();
   rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
   rec.ondataavailable = (e) => {
-    if (e.data && e.data.size) { queue.push({ seq: seq++, blob: e.data, pos: lastPos }); drain(); }
+    if (e.data && e.data.size) uploader.add({ seq: seq++, blob: e.data, pos: lastPos });
   };
   rec.onstop = finishUp;
   rec.start(5000);
 }
 
-function cleanup() {
+function stopCapture() {
   clearInterval(timerId);
   if (watchId !== null) navigator.geolocation.clearWatch(watchId);
   if (stream) stream.getTracks().forEach((t) => t.stop());
+}
+function cleanup() {
+  stopCapture();
   $("tap").disabled = false; $("tap").classList.remove("live");
   $("live").classList.add("hide");
   $("capture-card").querySelector(".capture").classList.remove("hide");
 }
 
 async function finishUp() {
-  $("stop").disabled = true; $("stop").textContent = "Sealing...";
+  stopCapture();
+  $("stop").disabled = true; $("stop").textContent = "Saving...";
   $("rec-badge").textContent = "Saving the last parts";
-  const t0 = Date.now();
-  while ((queue.length || draining) && Date.now() - t0 < 30000) await new Promise((r) => setTimeout(r, 300));
-  if (queue.length) {
-    showMsg("Some parts are still waiting for the network. Your record exists, but the last seconds may be missing. Open it from My records.", "warn");
+  await uploader.settled(); // waits for retries; never gives up on a timer
+  await seal(false);
+}
+
+// Ask the server to seal. It checks every part is present and unchanged, and says exactly what is wrong if not.
+async function seal(force) {
+  $("recover").classList.add("hide");
+  const failed = uploader.failed();
+  if (failed.length && !force) {
+    return showRecovery(`${failed.length} part${failed.length === 1 ? "" : "s"} could not be saved (part ${failed.map((f) => f.seq).join(", ")}). ${failed[0].error || ""}`);
   }
-  try { await ET.api(`/api/records/${recId}/finish`, { method: "POST", token }); } catch {}
-  cleanup();
+  try {
+    await ET.api(`/api/records/${recId}/finish?total=${uploader.total()}${force ? "&force=true" : ""}`, { method: "POST", token });
+  } catch (e) {
+    return showRecovery(e.status === 409 ? e.message : "Could not seal the record: " + e.message);
+  }
+  leaving = true; cleanup();
   location.href = `/record?id=${recId}&new=1`;
 }
+
+function showRecovery(text) {
+  $("rec-badge").textContent = "Needs attention"; $("rec-badge").className = "badge bad";
+  $("stop").classList.add("hide");
+  $("recover-text").textContent = text;
+  $("recover").classList.remove("hide");
+}
+$("retry-btn").addEventListener("click", async () => {
+  $("retry-btn").disabled = true;
+  uploader.retryFailed();
+  await uploader.settled();
+  $("retry-btn").disabled = false;
+  await seal(false);
+});
+$("incomplete-btn").addEventListener("click", async () => {
+  if (!confirm("Seal this record as incomplete? Parts that were not saved will be missing from the recording, and the record will say so.")) return;
+  await seal(true);
+});
+// Warn before leaving while recording or while parts exist only in this tab.
+window.addEventListener("beforeunload", (e) => {
+  if (leaving) return;
+  if ((rec && rec.state === "recording") || (uploader && uploader.hasUnsaved())) { e.preventDefault(); e.returnValue = ""; }
+});
 
 $("tap").addEventListener("click", start);
 $("stop").addEventListener("click", () => { if (rec && rec.state !== "inactive") { stopping = true; rec.stop(); } });

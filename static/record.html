@@ -32,6 +32,16 @@
     <div id="map"></div>
   </section>
 
+  <section class="card hide" id="recover-card">
+    <h2>This recording was not finished</h2>
+    <p class="muted" id="recover-text"></p>
+    <div class="row">
+      <button class="btn small" id="finish-btn" type="button">Finish this recording</button>
+      <button class="btn ghost small hide" id="force-btn" type="button">Seal as incomplete</button>
+    </div>
+    <p class="tiny" style="margin-top:10px">Parts already saved on the server are kept. Parts that never reached the server cannot be recovered. This page cannot know how many parts the phone recorded, so parts lost from the very end cannot be detected here.</p>
+  </section>
+
   <section class="card" id="audio-card">
     <h2>Recording</h2>
     <audio id="player" controls preload="metadata" class="hide"></audio>
@@ -144,7 +154,12 @@ async function load() {
 function render() {
   $("eyebrow").textContent = params.get("new") ? "Sealed just now" : "Your record";
   $("title").textContent = "Record " + data.id;
-  $("subtitle").textContent = "Created " + ET.fmtTime(data.created_at) + (data.status === "recording" ? " (recording was not finished)" : "");
+  $("subtitle").textContent = "Created " + ET.fmtTime(data.created_at) +
+    (data.status === "recording" ? " (recording was not finished)" : data.status === "incomplete" ? " (sealed as incomplete: some audio parts are missing)" : "");
+  $("recover-card").classList.toggle("hide", data.status !== "recording");
+  if (data.status === "recording") {
+    $("recover-text").textContent = `${data.chunk_count} audio part${data.chunk_count === 1 ? "" : "s"} reached the server before the recording stopped.`;
+  }
   $("fp").textContent = data.fingerprint || "";
   if (data.clock_skew_s !== null && Math.abs(data.clock_skew_s) > 120) {
     const s = $("skew"); s.classList.remove("hide");
@@ -183,6 +198,22 @@ async function checkIntegrity() {
   catch { $("integrity").innerHTML = `<span class="badge warn">Could not check</span>`; }
 }
 $("recheck").addEventListener("click", checkIntegrity);
+
+async function finishRecording(force) {
+  try {
+    await ET.api(`/api/records/${rid}/finish${force ? "?force=true" : ""}`, { method: "POST", token });
+    ET.toast(force ? "Sealed as incomplete" : "Recording sealed");
+    await load();
+  } catch (e) {
+    $("recover-text").textContent = e.message; // for a 409 this names the missing or damaged parts
+    if (e.status === 409) $("force-btn").classList.remove("hide");
+    else ET.toast("Could not finish: " + e.message, 4000);
+  }
+}
+$("finish-btn").addEventListener("click", () => finishRecording(false));
+$("force-btn").addEventListener("click", () => {
+  if (confirm("Seal as incomplete? The record will say that some audio parts are missing.")) finishRecording(true);
+});
 
 async function refresh() { data = await ET.api(`/api/records/${rid}`, { token }); $("fp").textContent = data.fingerprint || ""; renderChain(); showAck(); checkIntegrity(); }
 

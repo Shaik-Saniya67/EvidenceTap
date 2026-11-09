@@ -131,3 +131,30 @@ footer { border-top: 1px solid var(--line); margin-top: 30px; padding-top: 18px;
 .steps { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-top: 6px; }
 .steps div { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; font-size: .9rem; }
 .steps b { display: block; font-family: Georgia, serif; color: var(--rose-deep); margin-bottom: 2px; }
+
+
+/* Exit Call: on-screen simulation only. */
+.exit-call-card { border-style: dashed; }
+.exit-call-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; }
+.exit-call-heading .eyebrow { margin-bottom:8px; }
+.call-overlay { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:18px; background:rgba(20,12,17,.78); backdrop-filter:blur(8px); }
+.phone-screen { width:min(100%,390px); min-height:min(720px,88dvh); border-radius:34px; padding:20px 22px 18px; color:#fff; background:radial-gradient(ellipse at 50% 20%,#4a3545,#19131d 68%); box-shadow:0 24px 80px rgba(0,0,0,.45); display:flex; flex-direction:column; justify-content:space-between; text-align:center; border:1px solid rgba(255,255,255,.2); }
+.phone-status { display:flex; justify-content:space-between; font-size:.72rem; color:rgba(255,255,255,.72); }
+.call-content { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:30px 0; }
+.caller-avatar { width:104px; height:104px; border-radius:50%; display:grid; place-items:center; background:linear-gradient(145deg,#e8a8b7,#9b5570); font-size:2.7rem; margin-bottom:24px; box-shadow:0 10px 32px rgba(0,0,0,.22); }
+.call-kicker { color:#e9cbd5; font-size:.88rem; margin-bottom:6px; }
+.phone-screen h2 { color:#fff; font:500 2rem/1.2 system-ui,sans-serif; margin-bottom:8px; }
+.call-subtitle { color:rgba(255,255,255,.72); font-size:.84rem; max-width:260px; }
+.call-actions { width:100%; display:flex; justify-content:space-around; margin-top:54px; }
+.call-action { appearance:none; border:0; border-radius:999px; color:#fff; cursor:pointer; min-width:116px; min-height:58px; padding:10px 16px; display:inline-flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; font:600 .85rem system-ui,sans-serif; }
+.call-action span:first-child { font-size:1.2rem; }
+.call-action.decline { background:#d94351; } .call-action.accept { background:#269b64; }
+.call-duration { color:#e9cbd5; font:1.25rem ui-monospace,monospace; margin:10px 0 34px; }
+.call-controls { display:flex; gap:18px; margin-bottom:44px; }
+.call-control { border:1px solid rgba(255,255,255,.25); border-radius:18px; min-width:92px; min-height:76px; background:rgba(255,255,255,.12); color:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; cursor:pointer; font:500 .8rem system-ui; }
+.call-control[aria-pressed="true"] { background:rgba(255,255,255,.3); border-color:#fff; }
+.call-control span:first-child { font-size:1.25rem; }
+.end-call { min-width:180px; min-height:62px; }
+.simulation-disclaimer { color:rgba(255,255,255,.6); font-size:.68rem; letter-spacing:.08em; margin:10px 0 0; }
+.call-overlay button:focus-visible { outline:3px solid #fff; outline-offset:4px; }
+@media (prefers-reduced-motion:no-preference) { .caller-avatar { animation:caller-pulse 2.2s ease-in-out infinite; } @keyframes caller-pulse { 50% { box-shadow:0 0 0 12px rgba(255,255,255,.06),0 10px 32px rgba(0,0,0,.22); } } }
