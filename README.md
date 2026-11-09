@@ -30,8 +30,27 @@ Optional environment variables:
 | `TELEGRAM_BOT_TOKEN` | Sends the share link to a Telegram chat ID. WhatsApp link sharing works without it. |
 | `EVIDENCETAP_DATA` | Folder for the database and files (default `./data`). |
 | `EVIDENCETAP_DEMO=1` | Enables `/api/demo/tamper/{id}`, which flips one byte in a stored file so you can show the integrity check failing. Never enable this in real use. |
+| `EVIDENCETAP_TEMP_STORAGE` | Defaults to on: every page shows a "demo server, records are temporary" warning. Set to `0` only when `EVIDENCETAP_DATA` points at a persistent disk. |
 
-Check everything works: `python test_flow.py` (40 checks: capture, chain, sharing scopes, PDF, verify, tamper detection, delete).
+**Storage is temporary on Render's free tier.** Render's free web services lose local files, including SQLite databases, on every redeploy, restart and spin-down (after 15 minutes without traffic). Records on a free Render deployment can disappear. Use it for demos only, and download the PDF and audio of anything you want to keep. A persistent disk needs a paid Render service; set `EVIDENCETAP_DATA` to the disk's mount path and `EVIDENCETAP_TEMP_STORAGE=0`.
+
+Run the tests:
+
+```bash
+python test_flow.py                              # 40 checks: capture, chain, sharing scopes, PDF, verify, tamper detection, delete
+python -m unittest -v test_audio_reliability     # 25 checks: duplicate/conflicting/missing/out-of-order chunks, finish races, corruption
+node test_uploader.js                            # 9 checks: upload retry and recovery logic used by the capture page
+```
+
+The same three commands run in GitHub Actions (`.github/workflows/tests.yml`).
+
+## How audio recording stays reliable
+
+- **Idempotent uploads.** Each 5-second part has a sequence number. Re-sending the same bytes for a number is accepted and adds nothing (and repairs the stored file if it was damaged). Different bytes for an already-saved number are refused with HTTP 409 and the original is never replaced.
+- **Safe sealing.** Sealing runs in one database write transaction, so it cannot race with uploads or another seal request, and repeating it is harmless. The server checks there are no gaps, re-hashes every part, and builds the audio in sequence order, never arrival order.
+- **Nothing sealed silently incomplete.** If parts are missing or damaged, or none were saved, sealing is refused (HTTP 409) and the message names the part numbers. All received parts are kept. The recording can be completed later, or explicitly sealed as `incomplete`; then the audio holds only the verified, unbroken part from the start, and the record says so.
+- **Retry and recovery in the browser.** Temporary failures are retried with a growing delay. A part that still fails is kept, never discarded, and the user chooses to retry or to seal as incomplete. An unfinished recording can be finished from its record page.
+- **Limit:** the page can only detect parts lost from the very end of a recording if the browser tells the server how many it produced (the capture page does). Parts not yet uploaded live in the browser tab only; closing the tab loses them.
 
 ## Stack
 
@@ -58,7 +77,17 @@ FastAPI, SQLite, vanilla HTML/JS (MediaRecorder, Geolocation, SubtleCrypto), rep
 ## Files
 
 ```
-app.py            API, hash chain, PDF, verify
-static/           index (capture), record (owner view), share (trusted contact), verify
-test_flow.py      end-to-end checks
+app.py                     API, hash chain, PDF, verify
+static/                    index (capture), record (owner view), share (trusted contact), verify
+static/uploader.js         chunk upload queue: retry, backoff, keep-on-failure
+test_flow.py               end-to-end checks
+test_audio_reliability.py  audio reliability regression tests
+test_uploader.js           tests for the upload queue
 ```
+
+
+## Exit Call (simulated incoming call)
+
+The home screen includes an optional **Simulate an incoming call** control. It opens an on-screen incoming-call interface with Accept and Decline actions. Accepting switches to a simulated call screen with an elapsed-time display and local Mute/Speaker UI toggles; ending or declining closes it.
+
+This is a visual interaction only. It does not place or receive a telephone call, play a connected caller voice, trigger from the lock screen or hardware buttons, or record anything. Mute and Speaker are visual demo controls and do not control phone audio.
